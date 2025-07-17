@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SEC Filings Downloader</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 600px;
+            margin: 40px auto;
+            background: #fff;
+            padding: 30px 40px 40px 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        label {
+            font-weight: bold;
+        }
+        input[type="text"] {
+            width: 70%;
+            padding: 8px;
+            margin-right: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            padding: 8px 16px;
+            background: #0074d9;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1em;
+        }
+        button:disabled {
+            background: #aaa;
+            cursor: not-allowed;
+        }
+        .filings-list {
+            margin-top: 30px;
+        }
+        .filing-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            background: #f9f9f9;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        .filing-item label {
+            margin-left: 8px;
+            flex: 1;
+        }
+        .download-btn {
+            margin-top: 20px;
+            width: 100%;
+        }
+        .error {
+            color: #c00;
+            margin-top: 10px;
+        }
+        .loading {
+            color: #0074d9;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SEC Filings Downloader</h1>
+        <div>
+            <label for="ticker">Stock Ticker:</label>
+            <input type="text" id="ticker" placeholder="e.g. AAPL" />
+            <button id="searchBtn">Search</button>
+        </div>
+        <div id="status"></div>
+        <form id="filingsForm" class="filings-list" style="display:none;"></form>
+        <button id="downloadBtn" class="download-btn" style="display:none;">Download Selected Filings</button>
+    </div>
+    <script>
+        const searchBtn = document.getElementById('searchBtn');
+        const tickerInput = document.getElementById('ticker');
+        const statusDiv = document.getElementById('status');
+        const filingsForm = document.getElementById('filingsForm');
+        const downloadBtn = document.getElementById('downloadBtn');
+
+        let filingsData = [];
+
+        // Helper: Fetch CIK for ticker
+        async function fetchCIK(ticker) {
+            // SEC provides a mapping file
+            const url = 'https://www.sec.gov/files/company_tickers.json';
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('Failed to fetch ticker mapping.');
+            const data = await resp.json();
+            // data is an object with keys as numbers
+            for (const key in data) {
+                if (data[key].ticker.toUpperCase() === ticker.toUpperCase()) {
+                    // CIK is zero-padded to 10 digits
+                    return data[key].cik_str.toString().padStart(10, '0');
+                }
+            }
+            throw new Error('Ticker not found.');
+        }
+
+        // Helper: Fetch filings for CIK
+        async function fetchFilings(cik) {
+            // Use the SEC EDGAR submissions API
+            const url = `https://data.sec.gov/submissions/CIK${cik}.json`;
+            // SEC requires a User-Agent header, but browsers set their own
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('Failed to fetch filings.');
+            const data = await resp.json();
+            // filings.recent contains arrays of filings
+            const filings = [];
+            const recent = data.filings.recent;
+            for (let i = 0; i < recent.accessionNumber.length; i++) {
+                filings.push({
+                    accession: recent.accessionNumber[i],
+                    type: recent.form[i],
+                    filed: recent.filingDate[i],
+                    primaryDoc: recent.primaryDocument[i],
+                });
+            }
+            return filings;
+        }
+
+        // Helper: Build filing URL
+        function filingUrl(cik, accession, primaryDoc) {
+            // Remove dashes from accession
+            const accNo = accession.replace(/-/g, '');
+            return `https://www.sec.gov/Archives/edgar/data/${parseInt(cik, 10)}/${accNo}/${primaryDoc}`;
+        }
+
+        // UI: Show filings
+        function showFilings(filings, cik) {
+            filingsForm.innerHTML = '';
+            filingsData = filings.map(f => ({...f, cik}));
+            filings.forEach((filing, idx) => {
+                const id = `filing_${idx}`;
+                const url = filingUrl(cik, filing.accession, filing.primaryDoc);
+                const div = document.createElement('div');
+                div.className = 'filing-item';
+                div.innerHTML = `
+                    <input type="checkbox" id="${id}" name="filing" value="${idx}">
+                    <label for="${id}">
+                        <strong>${filing.type}</strong> - ${filing.filed} <br/>
+                        <a href="${url}" target="_blank">${filing.primaryDoc}</a>
+                    </label>
+                `;
+                filingsForm.appendChild(div);
+            });
+            filingsForm.style.display = 'block';
+            downloadBtn.style.display = 'block';
+        }
+
+        // UI: Show status
+        function setStatus(msg, type='') {
+            statusDiv.textContent = msg;
+            statusDiv.className = type;
+        }
+
+        // Search button click
+        searchBtn.onclick = async () => {
+            const ticker = tickerInput.value.trim();
+            filingsForm.style.display = 'none';
+            downloadBtn.style.display = 'none';
+            setStatus('', '');
+            if (!ticker) {
+                setStatus('Please enter a stock ticker.', 'error');
+                return;
+            }
+            setStatus('Fetching CIK for ticker...', 'loading');
+            try {
+                const cik = await fetchCIK(ticker);
+                setStatus('Fetching filings...', 'loading');
+                const filings = await fetchFilings(cik);
+                if (filings.length === 0) {
+                    setStatus('No filings found for this company.', 'error');
+                    return;
+                }
+                setStatus(`Found ${filings.length} filings.`, '');
+                showFilings(filings, cik);
+            } catch (e) {
+                setStatus(e.message, 'error');
+            }
+        };
+
+        // Download button click
+        downloadBtn.onclick = async (e) => {
+            e.preventDefault();
+            const checked = Array.from(filingsForm.querySelectorAll('input[name="filing"]:checked'));
+            if (checked.length === 0) {
+                setStatus('Please select at least one filing to download.', 'error');
+                return;
+            }
+            setStatus('Downloading selected filings...', 'loading');
+            for (const cb of checked) {
+                const idx = parseInt(cb.value, 10);
+                const filing = filingsData[idx];
+                const url = filingUrl(filing.cik, filing.accession, filing.primaryDoc);
+                try {
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error('Failed to download ' + filing.primaryDoc);
+                    const blob = await resp.blob();
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = filing.primaryDoc;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                } catch (err) {
+                    setStatus('Error downloading ' + filing.primaryDoc + ': ' + err.message, 'error');
+                    return;
+                }
+            }
+            setStatus('Download(s) started. Check your browser downloads.', '');
+        };
+    </script>
+</body>
+</html> 
